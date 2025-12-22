@@ -141,6 +141,8 @@ type githubPullRequest struct {
 	}
 }
 
+// githubRecentPullRequests is deprecated. Use githubViewerRepositories and githubRepoPullRequests instead.
+// Kept for backward compatibility.
 type githubRecentPullRequests struct {
 	Viewer struct {
 		Repositories struct {
@@ -237,7 +239,7 @@ type graphQLResult struct {
 
 var (
 	pullRequestQuery            string
-	recentPullRequestsQuery     string
+	recentPullRequestsQuery     string // Deprecated: use viewerRepositoriesQuery and repoPullRequestsQuery instead
 	viewerRepositoriesQuery     string
 	repoPullRequestsQuery       string
 )
@@ -356,7 +358,8 @@ func (g githubGateway) GetPullRequest(ctx context.Context, ref prchecklist.Check
 func (g githubGateway) GetRecentPullRequests(ctx context.Context) (map[string][]*prchecklist.PullRequest, error) {
 	pullRequests := map[string][]*prchecklist.PullRequest{}
 	
-	// Step 1: Paginate through all repositories
+	// Step 1: Paginate through all repositories accessible to the viewer
+	// This replaces the previous fixed limit of 10 repositories
 	var reposAfter string
 	for {
 		var reposResult githubViewerRepositories
@@ -367,7 +370,8 @@ func (g githubGateway) GetRecentPullRequests(ctx context.Context) (map[string][]
 			return nil, err
 		}
 		
-		// Step 2: For each repository, paginate through all pull requests
+		// Step 2: For each repository, paginate through all pull requests with baseRefName: "master"
+		// This replaces the previous fixed limit of 5 PRs per repository
 		for _, repoEdge := range reposResult.Viewer.Repositories.Edges {
 			repo := repoEdge.Node
 			nameWithOwner := repo.NameWithOwner
