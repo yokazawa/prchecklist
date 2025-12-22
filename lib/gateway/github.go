@@ -162,12 +162,70 @@ type githubRecentPullRequests struct {
 	}
 }
 
+// githubViewerRepositories is used for paginating through viewer's repositories
+type githubViewerRepositories struct {
+	GraphQLArguments struct {
+		After string `graphql:"$after"`
+	}
+	Viewer struct {
+		Repositories struct {
+			Edges []struct {
+				Node struct {
+					NameWithOwner string
+					Owner         struct {
+						Login string
+					}
+					Name string
+				}
+			}
+			PageInfo struct {
+				HasNextPage bool
+				EndCursor   string
+			}
+		} `graphql:"(first: 100, orderBy: {field: PUSHED_AT, direction: DESC}, affiliations: [OWNER, ORGANIZATION_MEMBER, COLLABORATOR], after: $after)"`
+	}
+}
+
+// githubRepoPullRequests is used for paginating through a repository's pull requests
+type githubRepoPullRequests struct {
+	GraphQLArguments struct {
+		Owner string `graphql:"$owner,notnull"`
+		Name  string `graphql:"$name,notnull"`
+		After string `graphql:"$after"`
+	}
+	Repository *struct {
+		PullRequests struct {
+			Edges []struct {
+				Node struct {
+					Title  string
+					Number int
+					URL    string
+				}
+			}
+			PageInfo struct {
+				HasNextPage bool
+				EndCursor   string
+			}
+		} `graphql:"(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}, baseRefName: \"master\", after: $after)"`
+	}
+}
+
 type githubPullRequsetVars struct {
 	Owner        string `json:"owner"`
 	Repo         string `json:"repo"`
 	Number       int    `json:"number"`
 	IsBase       bool   `json:"isBase"`
 	CommitsAfter string `json:"commitsAfter,omitempty"`
+}
+
+type githubViewerRepositoriesVars struct {
+	After string `json:"after,omitempty"`
+}
+
+type githubRepoPullRequestsVars struct {
+	Owner string `json:"owner"`
+	Name  string `json:"name"`
+	After string `json:"after,omitempty"`
 }
 
 type graphQLResult struct {
@@ -178,8 +236,10 @@ type graphQLResult struct {
 }
 
 var (
-	pullRequestQuery        string
-	recentPullRequestsQuery string
+	pullRequestQuery            string
+	recentPullRequestsQuery     string
+	viewerRepositoriesQuery     string
+	repoPullRequestsQuery       string
 )
 
 func mustBuildGraphQLQuery(q interface{}) []byte {
@@ -194,6 +254,8 @@ func mustBuildGraphQLQuery(q interface{}) []byte {
 func init() {
 	pullRequestQuery = string(mustBuildGraphQLQuery(&githubPullRequest{}))
 	recentPullRequestsQuery = string(mustBuildGraphQLQuery(&githubRecentPullRequests{}))
+	viewerRepositoriesQuery = string(mustBuildGraphQLQuery(&githubViewerRepositories{}))
+	repoPullRequestsQuery = string(mustBuildGraphQLQuery(&githubRepoPullRequests{}))
 }
 
 func (g githubGateway) GetBlob(ctx context.Context, ref prchecklist.ChecklistRef, sha string) ([]byte, error) {
@@ -292,29 +354,69 @@ func (g githubGateway) GetPullRequest(ctx context.Context, ref prchecklist.Check
 }
 
 func (g githubGateway) GetRecentPullRequests(ctx context.Context) (map[string][]*prchecklist.PullRequest, error) {
-	var result githubRecentPullRequests
-	err := g.queryGraphQL(ctx, recentPullRequestsQuery, nil, &result)
-	if err != nil {
-		return nil, err
-	}
-
 	pullRequests := map[string][]*prchecklist.PullRequest{}
-	for _, edge := range result.Viewer.Repositories.Edges {
-		repo := edge.Node
-		if len(repo.PullRequests.Edges) == 0 {
-			continue
+	
+	// Step 1: Paginate through all repositories
+	var reposAfter string
+	for {
+		var reposResult githubViewerRepositories
+		err := g.queryGraphQL(ctx, viewerRepositoriesQuery, githubViewerRepositoriesVars{
+			After: reposAfter,
+		}, &reposResult)
+		if err != nil {
+			return nil, err
 		}
-		pullRequests[repo.NameWithOwner] = make([]*prchecklist.PullRequest, len(repo.PullRequests.Edges))
-		for i, edge := range repo.PullRequests.Edges {
-			pullReq := edge.Node
-			pullRequests[repo.NameWithOwner][i] = &prchecklist.PullRequest{
-				Title:  pullReq.Title,
-				URL:    pullReq.URL,
-				Number: pullReq.Number,
+		
+		// Step 2: For each repository, paginate through all pull requests
+		for _, repoEdge := range reposResult.Viewer.Repositories.Edges {
+			repo := repoEdge.Node
+			nameWithOwner := repo.NameWithOwner
+			
+			var pullsAfter string
+			for {
+				var pullsResult githubRepoPullRequests
+				err := g.queryGraphQL(ctx, repoPullRequestsQuery, githubRepoPullRequestsVars{
+					Owner: repo.Owner.Login,
+					Name:  repo.Name,
+					After: pullsAfter,
+				}, &pullsResult)
+				if err != nil {
+					return nil, err
+				}
+				
+				// If repository is not accessible or doesn't exist, skip it
+				if pullsResult.Repository == nil {
+					break
+				}
+				
+				// Collect pull requests
+				for _, prEdge := range pullsResult.Repository.PullRequests.Edges {
+					pr := prEdge.Node
+					if pullRequests[nameWithOwner] == nil {
+						pullRequests[nameWithOwner] = []*prchecklist.PullRequest{}
+					}
+					pullRequests[nameWithOwner] = append(pullRequests[nameWithOwner], &prchecklist.PullRequest{
+						Title:  pr.Title,
+						URL:    pr.URL,
+						Number: pr.Number,
+					})
+				}
+				
+				// Check if there are more pull requests
+				if !pullsResult.Repository.PullRequests.PageInfo.HasNextPage {
+					break
+				}
+				pullsAfter = pullsResult.Repository.PullRequests.PageInfo.EndCursor
 			}
 		}
+		
+		// Check if there are more repositories
+		if !reposResult.Viewer.Repositories.PageInfo.HasNextPage {
+			break
+		}
+		reposAfter = reposResult.Viewer.Repositories.PageInfo.EndCursor
 	}
-
+	
 	return pullRequests, nil
 }
 
