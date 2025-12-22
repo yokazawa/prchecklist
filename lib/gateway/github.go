@@ -354,6 +354,14 @@ func (g githubGateway) GetPullRequest(ctx context.Context, ref prchecklist.Check
 	return pullReq, contextWithRepoAccessRight(ctx, ref), nil
 }
 
+// GetRecentPullRequests retrieves all pull requests with baseRefName "master"
+// from all repositories the viewer has access to.
+// This function uses cursor-based pagination to fetch all repositories and all PRs,
+// removing the previous hard-coded limits of 10 repositories and 5 PRs per repository.
+//
+// Performance consideration: For users with access to many repositories or PRs,
+// this can result in many API calls. If needed, pagination limits can be made
+// configurable via environment variables (e.g., MAX_REPOS, MAX_PRS_PER_REPO).
 func (g githubGateway) GetRecentPullRequests(ctx context.Context) (map[string][]*prchecklist.PullRequest, error) {
 	pullRequests := map[string][]*prchecklist.PullRequest{}
 
