@@ -356,6 +356,13 @@ func (g githubGateway) GetPullRequest(ctx context.Context, ref prchecklist.Check
 }
 
 func (g githubGateway) GetRecentPullRequests(ctx context.Context) (map[string][]*prchecklist.PullRequest, error) {
+	// Note: This implementation fetches all repositories and all their pull requests through pagination.
+	// For users with a very large number of repositories or PRs, this could lead to:
+	// - Higher API rate limit consumption
+	// - Longer response times
+	// Future enhancement: Consider adding configurable limits via environment variables
+	// (e.g., MAX_REPOS, MAX_PRS_PER_REPO) to balance completeness vs performance.
+	
 	pullRequests := map[string][]*prchecklist.PullRequest{}
 	
 	// Step 1: Paginate through all repositories accessible to the viewer
@@ -508,6 +515,9 @@ func (g githubGateway) queryGraphQL(ctx context.Context, query string, variables
 	client := prchecklist.ContextClient(ctx)
 
 	varBytes, err := json.Marshal(variables)
+	if err != nil {
+		return err
+	}
 
 	var buf bytes.Buffer
 	err = json.NewEncoder(&buf).Encode(map[string]string{"query": query, "variables": string(varBytes)})
