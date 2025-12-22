@@ -379,7 +379,7 @@ func (g githubGateway) GetRecentPullRequests(ctx context.Context) (map[string][]
 		// For each repository, paginate through all pull requests
 		for _, repoEdge := range reposResult.Viewer.Repositories.Edges {
 			repo := repoEdge.Node
-			
+
 			// Paginate through pull requests for this repository
 			pullsAfter := ""
 			var repoPRs []*prchecklist.PullRequest
