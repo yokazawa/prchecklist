@@ -370,6 +370,26 @@ func (g githubGateway) getPullRequest(ctx context.Context, ref prchecklist.Check
 		}
 	}
 
+	for {
+		pageInfo := qr.Repository.PullRequest.Commits.PageInfo
+		if !pageInfo.HasNextPage {
+			break
+		}
+
+		err := g.queryGraphQL(ctx, pullRequestQuery, githubPullRequestVars{
+			Owner:        ref.Owner,
+			Repo:         ref.Repo,
+			Number:       ref.Number,
+			IsBase:       isBase,
+			CommitsAfter: pageInfo.EndCursor,
+		}, &qr)
+		if err != nil {
+			return nil, err
+		}
+
+		pullReq.Commits = append(pullReq.Commits, graphqlResultToCommits(qr)...)
+	}
+
 	if qr.Repository.PullRequest.Commits.TotalCount < apiLimitationMaxNumberOfCommits {
 		return pullReq, nil
 	}
