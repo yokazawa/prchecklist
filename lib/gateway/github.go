@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -400,10 +401,12 @@ func (g githubGateway) getPullRequest(ctx context.Context, ref prchecklist.Check
 		return pullReq, listCommitsErr
 	}
 
-	if len(allCommits) > 0 {
-		pullReq.Commits = allCommits
+	if len(allCommits) == 0 {
+		log.Printf("warning: getCommitsByListCommits returned empty commits list, fallback to GraphQL API commits list\n")
+		return pullReq, nil
 	}
 
+	pullReq.Commits = allCommits
 	return pullReq, nil
 }
 
