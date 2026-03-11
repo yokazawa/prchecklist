@@ -1,3 +1,9 @@
+## [v2.8.0](https://github.com/motemen/prchecklist/compare/v2.7.0...v2.8.0) (2026-03-11)
+
+* feat: enable to handle a pull request has more than 250 commits [#226](https://github.com/motemen/prchecklist/pull/226) ([yokazawa](https://github.com/yokazawa))
+* use reg-viz [#203](https://github.com/motemen/prchecklist/pull/203) ([motemen](https://github.com/motemen))
+* chore(deps): update actions/setup-node action to v1.4.4 [#172](https://github.com/motemen/prchecklist/pull/172) ([renovate[bot]](https://github.com/apps/renovate))
+
 ## [v2.7.0](https://github.com/motemen/prchecklist/compare/v2.6.0...v2.7.0) (2020-06-23)
 
 * Fix
