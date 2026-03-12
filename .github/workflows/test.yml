@@ -35,7 +35,7 @@ jobs:
 
     - uses: actions/setup-node@v6
       with:
-        node-version: 14
+        node-version: 22
 
     - uses: actions/checkout@v6
       with:
@@ -81,12 +81,22 @@ jobs:
       env:
         PRCHECKLIST_TEST_GITHUB_TOKEN: ${{ secrets.PRCHECKLIST_TEST_GITHUB_TOKEN }}
 
+    # https://pptr.dev/troubleshooting#issues-with-apparmor-on-ubuntu
+    - name: Prepare Puppeteer SUID sandbox
+      id: sandbox
+      run: |
+        SANDBOX=$(find ~/.cache/puppeteer -type f -name chrome_sandbox | head -n1)
+        sudo chown root:root "$SANDBOX"
+        sudo chmod 4755 "$SANDBOX"
+        echo "sandbox_path=$SANDBOX" >> "$GITHUB_OUTPUT"
+
     - name: Test (integration)
       run: |
         mkdir __screenshots__
         TEST_SCREENSHOT_PATH=__screenshots__ make test-integration
       env:
         PRCHECKLIST_TEST_GITHUB_TOKEN: ${{ secrets.PRCHECKLIST_TEST_GITHUB_TOKEN }}
+        CHROME_DEVEL_SANDBOX: ${{ steps.sandbox.outputs.sandbox_path }}
 
     - name: Run reg-suit
       run: |
