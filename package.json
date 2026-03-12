@@ -8,9 +8,7 @@
     "@types/babel-core": "6.25.6",
     "@types/eslint": "6.8.1",
     "@types/eslint-plugin-prettier": "3.1.0",
-    "@types/expect-puppeteer": "5.0.6",
     "@types/jest": "30.0.0",
-    "@types/jest-environment-puppeteer": "5.0.6",
     "@types/prettier": "2.3.1",
     "@types/puppeteer": "7.0.4",
     "@types/react": "16.14.10",
@@ -31,7 +29,7 @@
     "eslint-plugin-react": "7.20.0",
     "jest": "30.3.0",
     "jest-environment-jsdom": "30.3.0",
-    "jest-puppeteer": "11.0.0",
+    "jest-puppeteer": "^11.0.0",
     "json-schema-to-typescript": "9.1.0",
     "npm-run-all": "4.1.5",
     "prettier": "2.0.5",
@@ -59,7 +57,7 @@
   "scripts": {
     "test": "jest",
     "serve": "npm-run-all -p serve:*",
-    "serve:frontend": "webpack-dev-server",
+    "serve:frontend": "webpack-dev-server --mode development",
     "serve:backend": "go run ./cmd/prchecklist --listen localhost:8081"
   }
 }
