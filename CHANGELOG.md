@@ -1,3 +1,8 @@
+## [v2.8.1](https://github.com/motemen/prchecklist/compare/v2.8.0...v2.8.1) (2026-03-12)
+
+* upgrade modules [#234](https://github.com/motemen/prchecklist/pull/234) ([motemen](https://github.com/motemen))
+* Replace node-sass with sass (Dart Sass) [#233](https://github.com/motemen/prchecklist/pull/233) ([Copilot](https://github.com/apps/copilot-swe-agent))
+
 ## [v2.8.0](https://github.com/motemen/prchecklist/compare/v2.7.0...v2.8.0) (2026-03-11)
 
 * feat: enable to handle a pull request has more than 250 commits [#226](https://github.com/motemen/prchecklist/pull/226) ([yokazawa](https://github.com/yokazawa))
