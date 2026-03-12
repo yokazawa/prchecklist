@@ -34,7 +34,7 @@ describe("prchecklist", () => {
 
     await page.click("#checklist-items ul li:nth-child(1) button");
 
-    await page.waitFor(1000);
+    await page.waitForTimeout(1000);
 
     const checked = await page.$eval(
       "#checklist-items ul li:nth-child(1) button",
@@ -49,7 +49,7 @@ describe("prchecklist", () => {
       await el.click();
     }
 
-    await page.waitFor(1000);
+    await page.waitForTimeout(1000);
     await maySaveScreenshot("03-pr-view-checked-all.png");
   });
 
