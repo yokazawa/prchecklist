@@ -4,7 +4,8 @@ module.exports = {
   entry: './static/typescript/index.tsx',
   output: {
     filename: 'bundle.js',
-    path: path.resolve(__dirname, 'static/js')
+    path: path.resolve(__dirname, 'static/js'),
+    publicPath: '/js/'
   },
   devtool: 'source-map',
   resolve: {
@@ -19,9 +20,14 @@ module.exports = {
   },
   devServer: {
     port: 8080,
-    proxy: {
-      '/': 'http://localhost:8081'
-    },
-    publicPath: '/js/'
+    proxy: [
+      {
+        context: () => true,
+        target: 'http://localhost:8081'
+      }
+    ],
+    devMiddleware: {
+      publicPath: '/js/'
+    }
   },
 };
