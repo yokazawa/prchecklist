@@ -140,7 +140,12 @@ func TestGitHub_getPullRequest_fallback(t *testing.T) {
 	// Mock REST PR
 	mux.HandleFunc("/api/v3/repos/o/r/pulls/1", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"commits": 300, "head": {"sha": "headsha"}}`))
+		w.Write([]byte(`{"commits": 300, "head": {"sha": "headsha"}, "base": {"ref": "master"}}`))
+	})
+
+	// Mock REST Compare (return error to exercise CompareCommits failure path)
+	mux.HandleFunc("/api/v3/repos/o/r/compare/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
 	})
 
 	// Mock REST Commits
@@ -176,4 +181,154 @@ func TestGitHub_getPullRequest_fallback(t *testing.T) {
 
 	// Verify log output
 	assert.Contains(t, logBuf.String(), "warning: getCommitsByListCommits returned empty commits list, fallback to GraphQL API commits list")
+}
+
+// buildCommitJSON builds a JSON array of RepositoryCommit objects for use in test mocks.
+func buildCommitJSON(shas []string) string {
+type innerCommit struct {
+Message string `json:"message"`
+}
+type commit struct {
+SHA    string      `json:"sha"`
+Commit innerCommit `json:"commit"`
+}
+commits := make([]commit, len(shas))
+for i, sha := range shas {
+commits[i] = commit{SHA: sha, Commit: innerCommit{Message: "msg-" + sha}}
+}
+b, _ := json.Marshal(commits)
+return string(b)
+}
+
+// TestGitHub_getCommitsByListCommits_boundaryFound tests that when CompareCommits
+// succeeds and the boundary SHA appears in the commit list, only commits before
+// the boundary (exclusive) are returned.
+func TestGitHub_getCommitsByListCommits_boundaryFound(t *testing.T) {
+mux := http.NewServeMux()
+
+mux.HandleFunc("/api/v3/repos/o/r/pulls/1", func(w http.ResponseWriter, r *http.Request) {
+w.Header().Set("Content-Type", "application/json")
+// targetCount=5; boundary is sha3 so only sha1,sha2 should survive
+w.Write([]byte(`{"commits": 5, "head": {"sha": "sha1"}, "base": {"ref": "main"}}`))
+})
+
+mux.HandleFunc("/api/v3/repos/o/r/compare/", func(w http.ResponseWriter, r *http.Request) {
+w.Header().Set("Content-Type", "application/json")
+// merge_base_commit is sha3; sha1,sha2 are "new", sha3+ are "old"
+w.Write([]byte(`{"merge_base_commit": {"sha": "sha3", "commit": {"message": "msg-sha3"}}}`))
+})
+
+mux.HandleFunc("/api/v3/repos/o/r/commits", func(w http.ResponseWriter, r *http.Request) {
+w.Header().Set("Content-Type", "application/json")
+// ListCommits returns newest first: sha1, sha2, sha3 (boundary), sha4, sha5
+w.Write([]byte(buildCommitJSON([]string{"sha1", "sha2", "sha3", "sha4", "sha5"})))
+})
+
+ts := httptest.NewTLSServer(mux)
+defer ts.Close()
+
+u, _ := url.Parse(ts.URL)
+g := githubGateway{domain: u.Host}
+
+ctx := context.WithValue(context.Background(), prchecklist.ContextKeyHTTPClient, ts.Client())
+ref := prchecklist.ChecklistRef{Owner: "o", Repo: "r", Number: 1}
+
+commits, err := g.getCommitsByListCommits(ctx, ref)
+assert.NoError(t, err)
+// sha3 is the boundary and must not be included; sha4, sha5 are beyond boundary.
+// The slice is reversed (oldest-first after reverse), so expected order is sha2, sha1.
+assert.Equal(t, []prchecklist.Commit{
+{Message: "msg-sha2", Oid: "sha2"},
+{Message: "msg-sha1", Oid: "sha1"},
+}, commits)
+}
+
+// TestGitHub_getCommitsByListCommits_compareCommitsFails tests that when
+// CompareCommits returns an error, the function falls back to collecting
+// targetCount commits.
+func TestGitHub_getCommitsByListCommits_compareCommitsFails(t *testing.T) {
+mux := http.NewServeMux()
+
+mux.HandleFunc("/api/v3/repos/o/r/pulls/1", func(w http.ResponseWriter, r *http.Request) {
+w.Header().Set("Content-Type", "application/json")
+w.Write([]byte(`{"commits": 3, "head": {"sha": "sha1"}, "base": {"ref": "main"}}`))
+})
+
+mux.HandleFunc("/api/v3/repos/o/r/compare/", func(w http.ResponseWriter, r *http.Request) {
+w.WriteHeader(http.StatusInternalServerError)
+})
+
+mux.HandleFunc("/api/v3/repos/o/r/commits", func(w http.ResponseWriter, r *http.Request) {
+w.Header().Set("Content-Type", "application/json")
+// Return 5 commits; only the first 3 (targetCount) should be taken.
+w.Write([]byte(buildCommitJSON([]string{"sha1", "sha2", "sha3", "sha4", "sha5"})))
+})
+
+ts := httptest.NewTLSServer(mux)
+defer ts.Close()
+
+u, _ := url.Parse(ts.URL)
+g := githubGateway{domain: u.Host}
+
+var logBuf bytes.Buffer
+log.SetOutput(&logBuf)
+defer log.SetOutput(os.Stderr)
+
+ctx := context.WithValue(context.Background(), prchecklist.ContextKeyHTTPClient, ts.Client())
+ref := prchecklist.ChecklistRef{Owner: "o", Repo: "r", Number: 1}
+
+commits, err := g.getCommitsByListCommits(ctx, ref)
+assert.NoError(t, err)
+// targetCount=3, reversed order: sha3, sha2, sha1
+assert.Equal(t, []prchecklist.Commit{
+{Message: "msg-sha3", Oid: "sha3"},
+{Message: "msg-sha2", Oid: "sha2"},
+{Message: "msg-sha1", Oid: "sha1"},
+}, commits)
+assert.Contains(t, logBuf.String(), "warning: Repositories.CompareCommits failed")
+}
+
+// TestGitHub_getCommitsByListCommits_boundaryNotFound tests that when
+// CompareCommits succeeds but the boundary SHA is not found in the commit list,
+// the function falls back to targetCount truncation.
+func TestGitHub_getCommitsByListCommits_boundaryNotFound(t *testing.T) {
+mux := http.NewServeMux()
+
+mux.HandleFunc("/api/v3/repos/o/r/pulls/1", func(w http.ResponseWriter, r *http.Request) {
+w.Header().Set("Content-Type", "application/json")
+w.Write([]byte(`{"commits": 2, "head": {"sha": "sha1"}, "base": {"ref": "main"}}`))
+})
+
+mux.HandleFunc("/api/v3/repos/o/r/compare/", func(w http.ResponseWriter, r *http.Request) {
+w.Header().Set("Content-Type", "application/json")
+// boundary SHA is not in the commit list returned by ListCommits
+w.Write([]byte(`{"merge_base_commit": {"sha": "notinlist", "commit": {"message": "old"}}}`))
+})
+
+mux.HandleFunc("/api/v3/repos/o/r/commits", func(w http.ResponseWriter, r *http.Request) {
+w.Header().Set("Content-Type", "application/json")
+w.Write([]byte(buildCommitJSON([]string{"sha1", "sha2", "sha3"})))
+})
+
+ts := httptest.NewTLSServer(mux)
+defer ts.Close()
+
+u, _ := url.Parse(ts.URL)
+g := githubGateway{domain: u.Host}
+
+var logBuf bytes.Buffer
+log.SetOutput(&logBuf)
+defer log.SetOutput(os.Stderr)
+
+ctx := context.WithValue(context.Background(), prchecklist.ContextKeyHTTPClient, ts.Client())
+ref := prchecklist.ChecklistRef{Owner: "o", Repo: "r", Number: 1}
+
+commits, err := g.getCommitsByListCommits(ctx, ref)
+assert.NoError(t, err)
+// boundary not found → fallback to targetCount=2, reversed: sha2, sha1
+assert.Equal(t, []prchecklist.Commit{
+{Message: "msg-sha2", Oid: "sha2"},
+{Message: "msg-sha1", Oid: "sha1"},
+}, commits)
+assert.Contains(t, logBuf.String(), "warning: boundary SHA notinlist not found in commit list")
 }

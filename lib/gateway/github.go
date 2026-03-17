@@ -423,6 +423,17 @@ func (g githubGateway) getCommitsByListCommits(ctx context.Context, ref prcheckl
 
 	targetCount := restPR.GetCommits()
 	headSHA := restPR.GetHead().GetSHA()
+	baseRefName := restPR.GetBase().GetRef()
+
+	// Try to get the merge-base boundary SHA via CompareCommits so that
+	// commits already present in the base branch are excluded.
+	var boundarySHA string
+	comparison, _, compareErr := gh.Repositories.CompareCommits(ctx, ref.Owner, ref.Repo, baseRefName, headSHA)
+	if compareErr != nil {
+		log.Printf("warning: Repositories.CompareCommits failed, falling back to commit count limit (%d): %v\n", targetCount, compareErr)
+	} else {
+		boundarySHA = comparison.GetMergeBaseCommit().GetSHA()
+	}
 
 	opt := &github.CommitsListOptions{
 		SHA: headSHA,
@@ -432,24 +443,42 @@ func (g githubGateway) getCommitsByListCommits(ctx context.Context, ref prcheckl
 	}
 
 	var allCommits []prchecklist.Commit
-	for len(allCommits) < targetCount {
+	boundaryFound := false
+
+outerLoop:
+	for {
 		commits, resp, err := gh.Repositories.ListCommits(ctx, ref.Owner, ref.Repo, opt)
 		if err != nil {
 			return []prchecklist.Commit{}, err
 		}
 		for _, commit := range commits {
+			sha := commit.GetSHA()
+			if boundarySHA != "" && sha == boundarySHA {
+				boundaryFound = true
+				break outerLoop
+			}
 			allCommits = append(allCommits, prchecklist.Commit{
 				Message: commit.GetCommit().GetMessage(),
-				Oid:     commit.GetSHA(),
+				Oid:     sha,
 			})
-			if len(allCommits) == targetCount {
-				break
+			// When no boundary is available, stop at targetCount (legacy behavior).
+			if boundarySHA == "" && len(allCommits) == targetCount {
+				break outerLoop
 			}
 		}
-		if resp.NextPage == 0 || len(allCommits) == targetCount {
+		if resp.NextPage == 0 {
 			break
 		}
 		opt.Page = resp.NextPage
+	}
+
+	// If the boundary SHA was obtained but never appeared in the commit list,
+	// fall back to the legacy targetCount truncation.
+	if boundarySHA != "" && !boundaryFound {
+		log.Printf("warning: boundary SHA %s not found in commit list, falling back to commit count limit (%d)\n", boundarySHA, targetCount)
+		if len(allCommits) > targetCount {
+			allCommits = allCommits[:targetCount]
+		}
 	}
 
 	// ListCommits returns commits in reverse order by createdAt,
