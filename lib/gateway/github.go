@@ -406,11 +406,93 @@ func (g githubGateway) getPullRequest(ctx context.Context, ref prchecklist.Check
 		return pullReq, nil
 	}
 
-	pullReq.Commits = allCommits
+	// fallback to list commits API if compare commits API returns empty commits list which can be caused by some edge cases such as force push.
+	listCommits, listCommitsErr := g.getCommitsByListCommits(ctx, ref, "")
+	if listCommitsErr != nil {
+		return pullReq, listCommitsErr
+	}
+
+	if len(listCommits) > 0 {
+		pullReq.Commits = listCommits
+		return pullReq, nil
+	}
+
+	log.Printf("warning: fallback to GraphQL API commits list\n")
+
 	return pullReq, nil
 }
 
-func (g githubGateway) getCommitsByListCommits(ctx context.Context, ref prchecklist.ChecklistRef) ([]prchecklist.Commit, error) {
+func (g githubGateway) getCommitsByListCommits(
+	ctx context.Context,
+	ref prchecklist.ChecklistRef,
+	excludeFromSHA string,
+) ([]prchecklist.Commit, error) {
+	gh, err := g.newGitHubClient(prchecklist.ContextClient(ctx))
+	if err != nil {
+		return []prchecklist.Commit{}, err
+	}
+
+	restPR, _, err := gh.PullRequests.Get(ctx, ref.Owner, ref.Repo, ref.Number)
+	if err != nil {
+		return []prchecklist.Commit{}, err
+	}
+
+	targetCount := restPR.GetCommits()
+	headSHA := restPR.GetHead().GetSHA()
+
+	opt := &github.CommitsListOptions{
+		SHA: headSHA,
+		ListOptions: github.ListOptions{
+			Page:    1,
+			PerPage: 100,
+		},
+	}
+
+	var allCommits []prchecklist.Commit
+	stopAtBoundary := false
+
+	for !stopAtBoundary {
+		commits, resp, err := gh.Repositories.ListCommits(ctx, ref.Owner, ref.Repo, opt)
+		if err != nil {
+			return []prchecklist.Commit{}, err
+		}
+
+		log.Printf("info: ListCommits: %d commits found, allCommits %d, page %d\n", len(commits), len(allCommits), opt.Page)
+
+		for _, commit := range commits {
+			sha := commit.GetSHA()
+			if excludeFromSHA != "" && sha == excludeFromSHA {
+				stopAtBoundary = true
+				break
+			}
+
+			allCommits = append(allCommits, prchecklist.Commit{
+				Message: commit.GetCommit().GetMessage(),
+				Oid:     sha,
+			})
+
+			if len(allCommits) == targetCount {
+				stopAtBoundary = true
+				break
+			}
+		}
+
+		if resp.NextPage == 0 || len(allCommits) == targetCount {
+			break
+		}
+
+		opt.Page = resp.NextPage
+	}
+
+	// ListCommits returns commits in reverse order by createdAt,
+	// so that reverse the slice to make it in the same order as GraphQL API returns.
+	for i, j := 0, len(allCommits)-1; i < j; i, j = i+1, j-1 {
+		allCommits[i], allCommits[j] = allCommits[j], allCommits[i]
+	}
+
+	return allCommits, nil
+}
+
 func (g githubGateway) getCommitsByCompareCommits(ctx context.Context, ref prchecklist.ChecklistRef) ([]prchecklist.Commit, error) {
 	gh, err := g.newGitHubClient(prchecklist.ContextClient(ctx))
 	if err != nil {
