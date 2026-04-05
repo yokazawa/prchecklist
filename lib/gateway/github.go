@@ -396,13 +396,13 @@ func (g githubGateway) getPullRequest(ctx context.Context, ref prchecklist.Check
 	}
 
 	// when PR commits count more than apiLimitationMaxNumberOfCommits, then fetch commits with REST API because of GraphQL API limitation.
-	allCommits, listCommitsErr := g.getCommitsByListCommits(ctx, ref)
-	if listCommitsErr != nil {
-		return pullReq, listCommitsErr
+	compareCommits, compareCommitsErr := g.getCommitsByCompareCommits(ctx, ref)
+	if compareCommitsErr != nil {
+		return pullReq, compareCommitsErr
 	}
 
-	if len(allCommits) == 0 {
-		log.Printf("warning: getCommitsByListCommits returned empty commits list, fallback to GraphQL API commits list\n")
+	if len(compareCommits) > 0 {
+		pullReq.Commits = compareCommits
 		return pullReq, nil
 	}
 
@@ -411,6 +411,7 @@ func (g githubGateway) getPullRequest(ctx context.Context, ref prchecklist.Check
 }
 
 func (g githubGateway) getCommitsByListCommits(ctx context.Context, ref prchecklist.ChecklistRef) ([]prchecklist.Commit, error) {
+func (g githubGateway) getCommitsByCompareCommits(ctx context.Context, ref prchecklist.ChecklistRef) ([]prchecklist.Commit, error) {
 	gh, err := g.newGitHubClient(prchecklist.ContextClient(ctx))
 	if err != nil {
 		return []prchecklist.Commit{}, err
@@ -421,44 +422,110 @@ func (g githubGateway) getCommitsByListCommits(ctx context.Context, ref prcheckl
 		return []prchecklist.Commit{}, err
 	}
 
-	targetCount := restPR.GetCommits()
+	baseRef := restPR.GetBase().GetRef()
 	headSHA := restPR.GetHead().GetSHA()
 
-	opt := &github.CommitsListOptions{
-		SHA: headSHA,
-		ListOptions: github.ListOptions{
-			PerPage: 100,
-		},
+	compare, _, err := gh.Repositories.CompareCommits(ctx, ref.Owner, ref.Repo, baseRef, headSHA)
+	if err != nil {
+		return []prchecklist.Commit{}, err
 	}
 
-	var allCommits []prchecklist.Commit
-	for len(allCommits) < targetCount {
-		commits, resp, err := gh.Repositories.ListCommits(ctx, ref.Owner, ref.Repo, opt)
-		if err != nil {
-			return []prchecklist.Commit{}, err
-		}
-		for _, commit := range commits {
-			allCommits = append(allCommits, prchecklist.Commit{
-				Message: commit.GetCommit().GetMessage(),
-				Oid:     commit.GetSHA(),
-			})
-			if len(allCommits) == targetCount {
-				break
-			}
-		}
-		if resp.NextPage == 0 || len(allCommits) == targetCount {
-			break
-		}
-		opt.Page = resp.NextPage
+	baseHeadCommit, _, err := gh.Repositories.GetCommit(ctx, ref.Owner, ref.Repo, baseRef)
+	if err != nil {
+		return []prchecklist.Commit{}, err
 	}
 
-	// ListCommits returns commits in reverse order by createdAt,
-	// so that reverse the slice to make it in the same order as GraphQL API returns.
-	for i, j := 0, len(allCommits)-1; i < j; i, j = i+1, j-1 {
-		allCommits[i], allCommits[j] = allCommits[j], allCommits[i]
+	ancestorMemo := map[string]bool{}
+
+	allCommits := make([]prchecklist.Commit, 0, len(compare.Commits))
+
+	log.Printf("info: CompareCommits: %d commits found, targetCount %d\n", len(compare.Commits), restPR.GetCommits())
+	for _, commit := range compare.Commits {
+		if isExcludedReleaseMergeCommitByParents(ctx, gh, ref.Owner, ref.Repo, baseHeadCommit.GetSHA(), commit, ancestorMemo) {
+			continue
+		}
+
+		allCommits = append(allCommits, prchecklist.Commit{
+			Message: commit.GetCommit().GetMessage(),
+			Oid:     commit.GetSHA(),
+		})
 	}
 
 	return allCommits, nil
+}
+
+func isExcludedReleaseMergeCommitByParents(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo, baseHeadSHA string,
+	commit *github.RepositoryCommit,
+	ancestorMemo map[string]bool,
+) bool {
+	if commit == nil || len(commit.Parents) < 2 {
+		return false
+	}
+
+	for _, parent := range commit.Parents {
+		if parent == nil || parent.GetSHA() == "" {
+			continue
+		}
+
+		ok, err := isAncestorOfCommit(ctx, gh, owner, repo, baseHeadSHA, parent.GetSHA(), ancestorMemo)
+		if err != nil {
+			log.Printf("warning: failed to inspect parent ancestry for %s: %v", commit.GetSHA(), err)
+			continue
+		}
+
+		if ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isAncestorOfCommit(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo, ancestorSHA, descendantSHA string,
+	ancestorMemo map[string]bool,
+) (bool, error) {
+	key := ancestorSHA + "\x00" + descendantSHA
+	if v, ok := ancestorMemo[key]; ok {
+		return v, nil
+	}
+
+	visited := map[string]struct{}{}
+	queue := []string{descendantSHA}
+
+	for len(queue) > 0 {
+		sha := queue[0]
+		queue = queue[1:]
+
+		if sha == ancestorSHA {
+			ancestorMemo[key] = true
+			return true, nil
+		}
+		if _, ok := visited[sha]; ok {
+			continue
+		}
+		visited[sha] = struct{}{}
+
+		cm, _, err := gh.Repositories.GetCommit(ctx, owner, repo, sha)
+		if err != nil {
+			return false, err
+		}
+
+		for _, p := range cm.Parents {
+			if p == nil || p.GetSHA() == "" {
+				continue
+			}
+			queue = append(queue, p.GetSHA())
+		}
+	}
+
+	ancestorMemo[key] = false
+	return false, nil
 }
 
 func (g githubGateway) graphqlEndpoint() string {
