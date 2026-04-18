@@ -56,6 +56,7 @@ func TestGitHub_GetPullRequest_UsesCompareCommitsWhenTooManyCommits(t *testing.T
 	}
 
 	randomBaseRef := randomRefName()
+	randomBaseSHA := randomRefName()
 
 	mux.HandleFunc("/api/graphql", func(w http.ResponseWriter, r *http.Request) {
 		res := map[string]interface{}{
@@ -120,10 +121,10 @@ func TestGitHub_GetPullRequest_UsesCompareCommitsWhenTooManyCommits(t *testing.T
 			"parents": [
 				{ "sha": "ancestor-sha" }
 			]
-		}`, randomBaseRef)))
+		}`, randomBaseSHA)))
 	})
 
-	mux.HandleFunc("/api/v3/repos/o/r/compare/"+randomBaseRef+"...headsha", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v3/repos/o/r/compare/"+randomBaseSHA+"...headsha", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{
 			"commits": [
@@ -158,6 +159,117 @@ func TestGitHub_GetPullRequest_UsesCompareCommitsWhenTooManyCommits(t *testing.T
 	require.Len(t, pr.Commits, 2)
 	assert.Equal(t, "feature commit 1", pr.Commits[0].Message)
 	assert.Equal(t, "feature commit 2", pr.Commits[1].Message)
+}
+
+func TestGitHub_GetPullRequest_FallsBackToGraphQLCommitsWhenCompareCommitsIsEmpty(t *testing.T) {
+	mux := http.NewServeMux()
+
+	randomRefName := func() string {
+		const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		seededRand := rand.New(rand.NewSource(time.Now().UnixNano()))
+		b := make([]byte, 20)
+		for i := range b {
+			b[i] = charset[seededRand.Intn(len(charset))]
+		}
+		return string(b)
+	}
+
+	randomBaseRef := randomRefName()
+	randomBaseSHA := randomRefName()
+	compareCalled := false
+
+	mux.HandleFunc("/api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		res := map[string]interface{}{
+			"data": map[string]interface{}{
+				"repository": map[string]interface{}{
+					"isPrivate": false,
+					"pullRequest": map[string]interface{}{
+						"url":    "http://example.com/1",
+						"title":  "title",
+						"number": 1,
+						"body":   "body",
+						"author": map[string]interface{}{
+							"login": "author",
+						},
+						"assignees": map[string]interface{}{
+							"edges": []interface{}{},
+						},
+						"baseRef": map[string]interface{}{
+							"name": randomBaseRef,
+						},
+						"headRef": map[string]interface{}{
+							"target": map[string]interface{}{
+								"tree": map[string]interface{}{
+									"entries": []interface{}{},
+								},
+							},
+						},
+						"commits": map[string]interface{}{
+							"totalCount": 300,
+							"edges": []interface{}{
+								map[string]interface{}{
+									"node": map[string]interface{}{
+										"commit": map[string]interface{}{
+											"message": "graphql commit",
+											"oid":     "abc",
+										},
+									},
+								},
+							},
+							"pageInfo": map[string]interface{}{
+								"hasNextPage": false,
+								"endCursor":   "",
+							},
+						},
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	mux.HandleFunc("/api/v3/repos/o/r/pulls/1", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"commits": 300, "head": {"sha": "headsha"}, "base": {"ref": "` + randomBaseRef + `"}}`))
+	})
+
+	mux.HandleFunc("/api/v3/repos/o/r/commits/"+randomBaseRef, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{
+			"sha": %q,
+			"parents": [
+				{ "sha": "ancestor-sha" }
+			]
+		}`, randomBaseSHA)))
+	})
+
+	mux.HandleFunc("/api/v3/repos/o/r/compare/"+randomBaseSHA+"...headsha", func(w http.ResponseWriter, r *http.Request) {
+		compareCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"commits": []}`))
+	})
+
+	ts := httptest.NewTLSServer(mux)
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	g := githubGateway{
+		domain: u.Host,
+	}
+
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, prchecklist.ContextKeyHTTPClient, ts.Client())
+
+	ref := prchecklist.ChecklistRef{Owner: "o", Repo: "r", Number: 1}
+	pr, err := g.getPullRequest(ctx, ref, true)
+
+	require.NoError(t, err)
+	require.True(t, compareCalled)
+	require.NotNil(t, pr)
+	require.Len(t, pr.Commits, 1)
+	assert.Equal(t, "graphql commit", pr.Commits[0].Message)
+	assert.Equal(t, "abc", pr.Commits[0].Oid)
 }
 
 func TestGitHub_getPullRequest_ExcludesReleaseMergeCommit(t *testing.T) {
@@ -269,8 +381,9 @@ func TestGitHub_getPullRequest_ExcludesReleaseMergeCommit(t *testing.T) {
 			}
 
 			baseRef := randomRefName()
+			baseHeadSHA := randomRefName()
 			defaultBranchRef := randomRefName()
-			compareCommits := buildCompareCommits(tc.commits, baseRef, defaultBranchRef)
+			compareCommits := buildCompareCommits(tc.commits, baseHeadSHA, defaultBranchRef)
 
 			sharedParentFetchCount := 0
 
@@ -334,7 +447,7 @@ func TestGitHub_getPullRequest_ExcludesReleaseMergeCommit(t *testing.T) {
 				}`, baseRef)))
 			})
 
-			mux.HandleFunc("/api/v3/repos/o/r/compare/"+baseRef+"...headsha", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("/api/v3/repos/o/r/compare/"+baseHeadSHA+"...headsha", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"commits": compareCommits,
@@ -348,7 +461,7 @@ func TestGitHub_getPullRequest_ExcludesReleaseMergeCommit(t *testing.T) {
 					"parents": [
 						{ "sha": "ancestor-sha" }
 					]
-				}`, baseRef)))
+				}`, baseHeadSHA)))
 			})
 
 			mux.HandleFunc("/api/v3/repos/o/r/commits/ancestor-sha", func(w http.ResponseWriter, r *http.Request) {
@@ -400,7 +513,7 @@ func TestGitHub_getPullRequest_ExcludesReleaseMergeCommit(t *testing.T) {
 				parents, _ := commit["parents"].([]map[string]interface{})
 				for _, parent := range parents {
 					sha, _ := parent["sha"].(string)
-					if sha == "" || sha == baseRef || sha == "shared-parent-sha" || sha == "other-parent-sha" {
+					if sha == "" || sha == baseHeadSHA || sha == "shared-parent-sha" || sha == "other-parent-sha" {
 						continue
 					}
 
@@ -439,157 +552,6 @@ func TestGitHub_getPullRequest_ExcludesReleaseMergeCommit(t *testing.T) {
 
 			if tc.expectedSharedParentFetchCount != nil {
 				assert.Equal(t, *tc.expectedSharedParentFetchCount, sharedParentFetchCount)
-			}
-		})
-	}
-}
-
-func TestGitHub_getPullRequest_ExcludesPreviousReleaseCommitsByHeadSHA(t *testing.T) {
-	type commitSpec struct {
-		sha     string
-		message string
-	}
-
-	type testCase struct {
-		name             string
-		listCommits      []commitSpec
-		excludeFromSHA   string
-		expectedMessages []string
-	}
-
-	testCases := []testCase{
-		{
-			name: "stops before previous release head and reverses returned commits",
-			listCommits: []commitSpec{
-				{sha: "new-1", message: "new commit 1"},
-				{sha: "new-2", message: "new commit 2"},
-				{sha: "prev-release-head", message: "previous release head"},
-				{sha: "old-1", message: "old commit 1"},
-			},
-			excludeFromSHA:   "prev-release-head",
-			expectedMessages: []string{"new commit 2", "new commit 1"},
-		},
-		{
-			name: "returns all commits when boundary sha is not present",
-			listCommits: []commitSpec{
-				{sha: "new-1", message: "new commit 1"},
-				{sha: "new-2", message: "new commit 2"},
-				{sha: "new-3", message: "new commit 3"},
-			},
-			excludeFromSHA:   "prev-release-head",
-			expectedMessages: []string{"new commit 3", "new commit 2", "new commit 1"},
-		},
-		{
-			name: "excludes boundary commit itself",
-			listCommits: []commitSpec{
-				{sha: "new-1", message: "new commit 1"},
-				{sha: "prev-release-head", message: "previous release head"},
-				{sha: "old-1", message: "old commit 1"},
-			},
-			excludeFromSHA:   "prev-release-head",
-			expectedMessages: []string{"new commit 1"},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			mux := http.NewServeMux()
-
-			mux.HandleFunc("/api/graphql", func(w http.ResponseWriter, r *http.Request) {
-				res := map[string]interface{}{
-					"data": map[string]interface{}{
-						"repository": map[string]interface{}{
-							"isPrivate": false,
-							"pullRequest": map[string]interface{}{
-								"url":    "http://example.com/1",
-								"title":  "title",
-								"number": 1,
-								"body":   "body",
-								"author": map[string]interface{}{
-									"login": "author",
-								},
-								"assignees": map[string]interface{}{
-									"edges": []interface{}{},
-								},
-								"baseRef": map[string]interface{}{
-									"name": "master",
-								},
-								"headRef": map[string]interface{}{
-									"target": map[string]interface{}{
-										"tree": map[string]interface{}{
-											"entries": []interface{}{},
-										},
-									},
-								},
-								"commits": map[string]interface{}{
-									"totalCount": 300,
-									"edges": []interface{}{
-										map[string]interface{}{
-											"node": map[string]interface{}{
-												"commit": map[string]interface{}{
-													"message": "graphql commit",
-													"oid":     "abc",
-												},
-											},
-										},
-									},
-									"pageInfo": map[string]interface{}{
-										"hasNextPage": false,
-										"endCursor":   "",
-									},
-								},
-							},
-						},
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(res)
-			})
-
-			mux.HandleFunc("/api/v3/repos/o/r/pulls/1", func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{
-					"commits": 300,
-					"head": {"sha": "headsha"},
-					"base": {"ref": "master"}
-				}`))
-			})
-
-			mux.HandleFunc("/api/v3/repos/o/r/commits", func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-
-				commits := make([]map[string]interface{}, 0, len(tc.listCommits))
-				for _, c := range tc.listCommits {
-					commits = append(commits, map[string]interface{}{
-						"sha": c.sha,
-						"commit": map[string]interface{}{
-							"message": c.message,
-						},
-					})
-				}
-
-				_ = json.NewEncoder(w).Encode(commits)
-			})
-
-			ts := httptest.NewTLSServer(mux)
-			defer ts.Close()
-
-			u, _ := url.Parse(ts.URL)
-			g := githubGateway{
-				domain: u.Host,
-			}
-
-			ctx := context.Background()
-			ctx = context.WithValue(ctx, prchecklist.ContextKeyHTTPClient, ts.Client())
-
-			ref := prchecklist.ChecklistRef{Owner: "o", Repo: "r", Number: 1}
-			commits, err := g.getCommitsByListCommits(ctx, ref, tc.excludeFromSHA)
-
-			require.NoError(t, err)
-			require.Len(t, commits, len(tc.expectedMessages))
-
-			for i, msg := range tc.expectedMessages {
-				assert.Equal(t, msg, commits[i].Message)
 			}
 		})
 	}
