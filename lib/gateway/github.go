@@ -13,7 +13,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/google/go-github/v31/github"
+	"github.com/google/go-github/v85/github"
 	graphqlquery "github.com/motemen/go-graphql-query"
 	"github.com/patrickmn/go-cache"
 	"github.com/pkg/errors"
@@ -422,110 +422,36 @@ func (g githubGateway) getCommitsByCompareCommits(ctx context.Context, ref prche
 		return []prchecklist.Commit{}, err
 	}
 
-	baseRef := restPR.GetBase().GetRef()
+	baseSHA := restPR.GetBase().GetSHA()
 	headSHA := restPR.GetHead().GetSHA()
 
-	baseHeadCommit, _, err := gh.Repositories.GetCommit(ctx, ref.Owner, ref.Repo, baseRef)
-	if err != nil {
-		return []prchecklist.Commit{}, err
-	}
+	allCommits := make([]prchecklist.Commit, 0)
 
-	compare, _, err := gh.Repositories.CompareCommits(ctx, ref.Owner, ref.Repo, baseHeadCommit.GetSHA(), headSHA)
-	if err != nil {
-		return []prchecklist.Commit{}, err
-	}
-
-	ancestorMemo := map[string]bool{}
-
-	allCommits := make([]prchecklist.Commit, 0, len(compare.Commits))
-
-	log.Printf("info: CompareCommits: %d commits found, targetCount %d\n", len(compare.Commits), restPR.GetCommits())
-	for _, commit := range compare.Commits {
-		if isExcludedReleaseMergeCommitByParents(ctx, gh, ref.Owner, ref.Repo, baseHeadCommit.GetSHA(), commit, ancestorMemo) {
-			continue
+	// Pagination loop to fetch all commits
+	for page := 1; ; page++ {
+		listOptions := &github.ListOptions{
+			PerPage: apiLimitationMaxNumberOfCommits,
+			Page:    page,
+		}
+		compare, _, err := gh.Repositories.CompareCommits(ctx, ref.Owner, ref.Repo, baseSHA, headSHA, listOptions)
+		if err != nil {
+			return []prchecklist.Commit{}, err
 		}
 
-		allCommits = append(allCommits, prchecklist.Commit{
-			Message: commit.GetCommit().GetMessage(),
-			Oid:     commit.GetSHA(),
-		})
+		for _, commit := range compare.Commits {
+			allCommits = append(allCommits, prchecklist.Commit{
+				Message: commit.GetCommit().GetMessage(),
+				Oid:     commit.GetSHA(),
+			})
+		}
+
+		// If we got fewer commits than PerPage, this is the last page
+		if len(compare.Commits) < apiLimitationMaxNumberOfCommits {
+			break
+		}
 	}
 
 	return allCommits, nil
-}
-
-func isExcludedReleaseMergeCommitByParents(
-	ctx context.Context,
-	gh *github.Client,
-	owner, repo, baseHeadSHA string,
-	commit *github.RepositoryCommit,
-	ancestorMemo map[string]bool,
-) bool {
-	if commit == nil || len(commit.Parents) < 2 {
-		return false
-	}
-
-	for _, parent := range commit.Parents {
-		if parent == nil || parent.GetSHA() == "" {
-			continue
-		}
-
-		ok, err := isAncestorOfCommit(ctx, gh, owner, repo, baseHeadSHA, parent.GetSHA(), ancestorMemo)
-		if err != nil {
-			log.Printf("warning: failed to inspect parent ancestry for %s: %v", commit.GetSHA(), err)
-			continue
-		}
-
-		if ok {
-			return true
-		}
-	}
-
-	return false
-}
-
-func isAncestorOfCommit(
-	ctx context.Context,
-	gh *github.Client,
-	owner, repo, ancestorSHA, descendantSHA string,
-	ancestorMemo map[string]bool,
-) (bool, error) {
-	key := ancestorSHA + "\x00" + descendantSHA
-	if v, ok := ancestorMemo[key]; ok {
-		return v, nil
-	}
-
-	visited := map[string]struct{}{}
-	queue := []string{descendantSHA}
-
-	for len(queue) > 0 {
-		sha := queue[0]
-		queue = queue[1:]
-
-		if sha == ancestorSHA {
-			ancestorMemo[key] = true
-			return true, nil
-		}
-		if _, ok := visited[sha]; ok {
-			continue
-		}
-		visited[sha] = struct{}{}
-
-		cm, _, err := gh.Repositories.GetCommit(ctx, owner, repo, sha)
-		if err != nil {
-			return false, err
-		}
-
-		for _, p := range cm.Parents {
-			if p == nil || p.GetSHA() == "" {
-				continue
-			}
-			queue = append(queue, p.GetSHA())
-		}
-	}
-
-	ancestorMemo[key] = false
-	return false, nil
 }
 
 func (g githubGateway) graphqlEndpoint() string {
@@ -631,7 +557,7 @@ func (g githubGateway) SetRepositoryStatusAs(ctx context.Context, owner, repo, r
 		return err
 	}
 
-	status := &github.RepoStatus{
+	status := github.RepoStatus{
 		State:     &state,
 		Context:   &contextName,
 		TargetURL: &targetURL,
